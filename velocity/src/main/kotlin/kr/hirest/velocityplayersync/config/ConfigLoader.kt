@@ -15,7 +15,7 @@ object ConfigLoader {
 
     /**
      * `config.yml` 을 읽는다. 파일이 없으면 기본 파일을 복사하고,
-     * 빠진 항목은 기본값으로 채운다(파일에는 다시 쓰지 않아 주석이 보존된다).
+     * 빠진 항목은 기본값과 주석을 파일 끝에 덧붙인다(기존 내용과 주석은 그대로 둔다).
      */
     fun load(dataDirectory: Path, logger: Logger): PluginConfig {
         Files.createDirectories(dataDirectory)
@@ -24,6 +24,11 @@ object ConfigLoader {
             val stream = ConfigLoader::class.java.getResourceAsStream("/config.yml")
                 ?: throw ConfigException("jar 안에 기본 config.yml 이 없습니다.")
             stream.use { Files.copy(it, file) }
+        }
+
+        ConfigLoader::class.java.getResourceAsStream("/config.yml")?.use { stream ->
+            val added = YamlKeyFiller.fill(file, String(stream.readAllBytes(), Charsets.UTF_8))
+            if (added > 0) logger.info("config.yml 에 빠져 있던 항목 {}개를 기본값으로 추가했습니다.", added)
         }
 
         val defaults = YamlConfigurationLoader.builder()

@@ -32,7 +32,7 @@ class ConfigLoaderTest {
     }
 
     @Test
-    fun `missing keys fall back to defaults without rewriting the file`() {
+    fun `missing keys are appended to the file and existing text is kept`() {
         val dir = Files.createTempDirectory("vps-config")
         val file = dir.resolve("config.yml")
         val content = "# 내 주석\nproxy-id: \"proxy-b\"\nping:\n  max-players:\n    mode: fixed\n"
@@ -43,7 +43,88 @@ class ConfigLoaderTest {
         assertEquals(MaxPlayersMode.FIXED, config.ping.maxPlayersMode)
         assertEquals(500, config.ping.fixedMaxPlayers)
         assertEquals(Duration.ofSeconds(10), config.sync.fullResyncInterval)
-        assertEquals(content, file.readText(), "사용자 파일(주석 포함)은 그대로 둬야 합니다")
+        val result = file.readText()
+        assertTrue(result.startsWith(content), "사용자 파일(주석 포함)은 그대로 둬야 합니다")
+        assertTrue(result.contains("# 같은 계정이 다른 프록시에 이미 접속해 있을 때\nduplicate-login:\n  enabled: true\n"))
+
+        // 한 번 채운 뒤에는 다시 읽어도 파일이 바뀌지 않는다.
+        ConfigLoader.load(dir, logger)
+        assertEquals(result, file.readText())
+    }
+
+    @Test
+    fun `missing top-level key is appended with its comment`() {
+        val dir = Files.createTempDirectory("vps-config")
+        val file = dir.resolve("config.yml")
+        val defaults = ConfigLoader::class.java.getResource("/config.yml")!!.readText()
+        val withoutDup = defaults.replace(
+            Regex("# 같은 계정이 다른 프록시에 이미 접속해 있을 때\nduplicate-login:\n(  .*\n)+\n"), "",
+        )
+        assertTrue(withoutDup.length < defaults.length)
+        file.writeText(withoutDup)
+
+        assertEquals(1, YamlKeyFiller.fill(file, defaults))
+        val result = file.readText()
+        assertTrue(result.startsWith(withoutDup))
+        assertEquals(
+            "\n# 같은 계정이 다른 프록시에 이미 접속해 있을 때\nduplicate-login:\n  enabled: true\n" +
+                "  # KICK_OLD : 기존 접속을 끊고 새 접속을 받습니다. (바닐라와 같은 동작)\n" +
+                "  # DENY_NEW : 새 접속을 거부합니다.\n  action: KICK_OLD\n",
+            result.removePrefix(withoutDup),
+        )
+    }
+
+    @Test
+    fun `missing nested key is inserted at the end of its parent`() {
+        val dir = Files.createTempDirectory("vps-config")
+        val file = dir.resolve("config.yml")
+        val defaults = "a:\n  # 설명\n  x: 1\n  y: 2\nb: 1\n"
+        val mine = "a:\n  x: 5\n# 메모\nb: 9\n"
+        file.writeText(mine)
+        assertEquals(1, YamlKeyFiller.fill(file, defaults))
+        assertEquals("a:\n  x: 5\ny: 2\n# 메모\nb: 9\n".replace("\ny: 2", "\n  y: 2"), file.readText())
+    }
+
+    @Test
+    fun `opaque sections are not refilled once they exist`() {
+        val dir = Files.createTempDirectory("vps-config")
+        val file = dir.resolve("config.yml")
+        val defaults = "servers:\n  a: 1\n  b: 2\nname: x\n"
+        file.writeText("servers:\n  a: 1\n")
+        assertEquals(1, YamlKeyFiller.fill(file, defaults, setOf("servers")))
+        assertEquals("servers:\n  a: 1\n\nname: x\n", file.readText())
+
+        file.writeText("name: x\n")
+        assertEquals(1, YamlKeyFiller.fill(file, defaults, setOf("servers")))
+        assertEquals("name: x\n\nservers:\n  a: 1\n  b: 2\n", file.readText())
+    }
+
+    @Test
+    fun `complete file is left untouched byte for byte`() {
+        val dir = Files.createTempDirectory("vps-config")
+        val file = dir.resolve("config.yml")
+        val defaults = ConfigLoader::class.java.getResource("/config.yml")!!.readText()
+        val mine = defaults.replace("\n", "\r\n").trimEnd() // CRLF, 끝 줄바꿈 없음
+        file.writeText(mine)
+        val before = Files.getLastModifiedTime(file)
+
+        assertEquals(0, YamlKeyFiller.fill(file, defaults))
+        assertEquals(mine, file.readText())
+        assertEquals(before, Files.getLastModifiedTime(file))
+    }
+
+    @Test
+    fun `unparsable file is left untouched`() {
+        val dir = Files.createTempDirectory("vps-config")
+        val file = dir.resolve("config.yml")
+        val broken = "proxy-id: [unclosed\nredis: {a: \n  - x\n"
+        file.writeText(broken)
+        val defaults = ConfigLoader::class.java.getResource("/config.yml")!!.readText()
+
+        assertEquals(0, YamlKeyFiller.fill(file, defaults))
+        assertEquals(broken, file.readText())
+        assertFailsWith<ConfigException> { ConfigLoader.load(dir, logger) }
+        assertEquals(broken, file.readText())
     }
 
     @Test
